@@ -156,6 +156,22 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("attachments", sent)
         self.assertIn("Не удалось", sent["text"])
 
+    async def test_manager_payload_uses_separate_binding_scenario(self) -> None:
+        bot = SimpleNamespace(send_message=AsyncMock())
+        consilium = SimpleNamespace(
+            bind_manager=AsyncMock(return_value={
+                "display_name": "Ольга", "manager_url": "https://example.test/manager",
+            }),
+        )
+        await send_auth_link(
+            bot=bot, chat_id=10, max_user_id=20,
+            intent_token="mgr_secret", consilium=consilium,
+        )
+        consilium.bind_manager.assert_awaited_once_with(20, 10, "mgr_secret")
+        sent = bot.send_message.await_args.kwargs
+        self.assertIn("менеджера", sent["text"])
+        self.assertEqual(sent["attachments"][0].payload.buttons[0][0].url, "https://example.test/manager")
+
     async def test_bot_started_payload_is_forwarded_to_consilium(self) -> None:
         class FakeEventHook:
             def __init__(self) -> None:

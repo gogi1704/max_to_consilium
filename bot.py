@@ -170,6 +170,22 @@ def post_json(
     return result
 
 
+def get_json(
+    url: str, *, headers: dict[str, str] | None = None, timeout: int = 15,
+) -> dict[str, Any]:
+    request = Request(url, headers=headers or {}, method="GET")
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        raise RemoteAPIError(f"HTTP {exc.code}") from exc
+    except (URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise RemoteAPIError("сервис уведомлений временно недоступен") from exc
+    if not isinstance(result, dict):
+        raise RemoteAPIError("сервис вернул некорректный ответ")
+    return result
+
+
 class ConsiliumClient:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -196,6 +212,38 @@ class ConsiliumClient:
         if not auth_url.startswith(("http://", "https://")):
             raise RemoteAPIError("сервис не вернул ссылку для входа")
         return auth_url
+
+    async def bind_manager(self, max_user_id: int, chat_id: int, token: str) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            post_json,
+            f"{self.settings.consilium_api_url}/api/bot/manager-bind",
+            {
+                "provider": "max", "provider_user_id": str(max_user_id),
+                "chat_id": str(chat_id), "token": token,
+            },
+            headers={"Authorization": f"Bearer {self.settings.bot_integration_secret}"},
+            timeout=self.settings.request_timeout,
+        )
+
+    async def pull_manager_notifications(self) -> list[dict[str, Any]]:
+        result = await asyncio.to_thread(
+            get_json,
+            f"{self.settings.consilium_api_url}/api/bot/manager-notifications?provider=max&limit=20",
+            headers={"Authorization": f"Bearer {self.settings.bot_integration_secret}"},
+            timeout=self.settings.request_timeout,
+        )
+        return result.get("notifications", [])
+
+    async def acknowledge_notification(
+        self, notification_id: int, lease_token: str, success: bool, error: str = "",
+    ) -> None:
+        await asyncio.to_thread(
+            post_json,
+            f"{self.settings.consilium_api_url}/api/bot/manager-notifications/{notification_id}/ack",
+            {"lease_token": lease_token, "success": success, "error": error},
+            headers={"Authorization": f"Bearer {self.settings.bot_integration_secret}"},
+            timeout=self.settings.request_timeout,
+        )
 
 
 def auth_attachment(auth_url: str):
@@ -239,6 +287,16 @@ async def send_auth_link(
     consilium: ConsiliumClient,
 ) -> None:
     try:
+        if intent_token.startswith("mgr_"):
+            binding = await consilium.bind_manager(max_user_id, chat_id, intent_token)
+            manager_url = str(binding.get("manager_url") or "")
+            attachments = [ButtonsPayload(buttons=[[LinkButton(text="Открыть панель менеджера", url=manager_url)]]).pack()] if manager_url else []
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"Готово! MAX привязан к учётной записи менеджера «{binding.get('display_name') or 'Менеджер'}». Теперь сюда будут приходить рабочие уведомления.",
+                attachments=attachments,
+            )
+            return
         auth_url = await consilium.create_auth_link(
             max_user_id=max_user_id,
             intent_token=intent_token,
@@ -345,11 +403,39 @@ async def run() -> None:
     await bot.delete_webhook()
     LOG.info("Webhook MAX отключён; бот запущен в режиме long polling")
     heartbeat_task = asyncio.create_task(heartbeat(settings))
+    async def notification_loop() -> None:
+        while True:
+            try:
+                for notification in await consilium.pull_manager_notifications():
+                    success = False
+                    error = ""
+                    try:
+                        payload = notification.get("payload") or {}
+                        manager_url = str(payload.get("manager_url") or "")
+                        attachments = [ButtonsPayload(buttons=[[LinkButton(text="Открыть диалог", url=manager_url)]]).pack()] if manager_url else []
+                        await bot.send_message(
+                            chat_id=int(notification["recipient_id"]),
+                            text=f"{payload.get('title') or 'Уведомление Консилиума'}\n\n{payload.get('body') or 'Откройте панель менеджера.'}",
+                            attachments=attachments,
+                        )
+                        success = True
+                    except Exception as exc:
+                        error = str(exc)
+                        LOG.warning("Не удалось отправить уведомление менеджеру: %s", exc)
+                    await consilium.acknowledge_notification(
+                        int(notification["id"]), str(notification["lease_token"]), success, error,
+                    )
+            except RemoteAPIError as exc:
+                LOG.warning("Ошибка получения уведомлений менеджеров: %s", exc)
+            await asyncio.sleep(5)
+
+    notification_task = asyncio.create_task(notification_loop())
     try:
         await dispatcher.start_polling(bot)
     finally:
         heartbeat_task.cancel()
-        await asyncio.gather(heartbeat_task, return_exceptions=True)
+        notification_task.cancel()
+        await asyncio.gather(heartbeat_task, notification_task, return_exceptions=True)
         await bot.close_session()
 
 

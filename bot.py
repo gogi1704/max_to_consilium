@@ -265,6 +265,20 @@ def auth_attachment(auth_url: str):
     ).pack()
 
 
+def notification_attachment(payload: dict[str, Any]):
+    manager_url = str(payload.get("manager_url") or "")
+    action_url = str(payload.get("action_url") or manager_url)
+    if not action_url.startswith(("http://", "https://")):
+        return None
+    action_label = str(
+        payload.get("action_label")
+        or ("Открыть диалог" if manager_url else "Открыть")
+    )
+    return ButtonsPayload(buttons=[[
+        LinkButton(text=action_label[:64], url=action_url),
+    ]]).pack()
+
+
 def refresh_attachment():
     return ButtonsPayload(
         buttons=[
@@ -412,8 +426,8 @@ async def run() -> None:
                     error = ""
                     try:
                         payload = notification.get("payload") or {}
-                        manager_url = str(payload.get("manager_url") or "")
-                        attachments = [ButtonsPayload(buttons=[[LinkButton(text="Открыть диалог", url=manager_url)]]).pack()] if manager_url else []
+                        action_attachment = notification_attachment(payload)
+                        attachments = [action_attachment] if action_attachment else []
                         await bot.send_message(
                             chat_id=int(notification["recipient_id"]),
                             text=f"{payload.get('title') or 'Уведомление Консилиума'}\n\n{payload.get('body') or 'Откройте панель менеджера.'}",

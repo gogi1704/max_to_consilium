@@ -17,6 +17,7 @@ from bot import (
     REFRESH_LINK_CALLBACK,
     healthcheck,
     mark_healthy,
+    notification_attachment,
     refresh_auth_link,
     register_handlers,
     send_auth_link,
@@ -24,6 +25,17 @@ from bot import (
 
 
 class SettingsTests(unittest.TestCase):
+    def test_result_notification_has_open_results_button(self) -> None:
+        attachment = notification_attachment({
+            "action_url": "https://consilium.test/result",
+            "action_label": "Открыть результаты",
+        })
+
+        self.assertIsNotNone(attachment)
+        button = attachment.payload.buttons[0][0]
+        self.assertEqual(button.text, "Открыть результаты")
+        self.assertEqual(button.url, "https://consilium.test/result")
+
     def test_settings_are_loaded_and_api_url_is_normalized(self) -> None:
         env = {
             "MAX_BOT_TOKEN": "max-token",

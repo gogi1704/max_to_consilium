@@ -85,6 +85,7 @@ class ConsiliumClientTests(unittest.IsolatedAsyncioTestCase):
         with patch("bot.post_json", return_value=expected) as post:
             result = await ConsiliumClient(settings).create_auth_link(
                 max_user_id=123456789,
+                chat_id=987654321,
                 intent_token="bind-token",
             )
 
@@ -97,6 +98,7 @@ class ConsiliumClientTests(unittest.IsolatedAsyncioTestCase):
                 {
                     "provider": "max",
                     "provider_user_id": "123456789",
+                    "chat_id": "987654321",
                     "intent_token": "bind-token",
                 },
             ),
@@ -110,7 +112,7 @@ class ConsiliumClientTests(unittest.IsolatedAsyncioTestCase):
         settings = Settings("max-token", "https://example.test", "secret")
         with patch("bot.post_json", return_value={"auth_url": "javascript:x"}):
             with self.assertRaises(RemoteAPIError):
-                await ConsiliumClient(settings).create_auth_link(1)
+                await ConsiliumClient(settings).create_auth_link(1, 2)
 
 
 class HandlerTests(unittest.IsolatedAsyncioTestCase):
@@ -132,6 +134,7 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
 
         consilium.create_auth_link.assert_awaited_once_with(
             max_user_id=20,
+            chat_id=10,
             intent_token="intent",
         )
         bot.send_message.assert_awaited_once()
@@ -219,6 +222,7 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
 
         consilium.create_auth_link.assert_awaited_once_with(
             max_user_id=20,
+            chat_id=10,
             intent_token="bind-token",
         )
 
@@ -229,7 +233,10 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
                 payload=REFRESH_LINK_CALLBACK,
                 user=SimpleNamespace(user_id=20),
             ),
-            message=message,
+            message=SimpleNamespace(
+                edit=message.edit,
+                recipient=SimpleNamespace(chat_id=10),
+            ),
             edit=AsyncMock(),
         )
         consilium = SimpleNamespace(
@@ -242,7 +249,10 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
             await refresh_auth_link(event, consilium)
 
         event.edit.assert_awaited_once()
-        consilium.create_auth_link.assert_awaited_once_with(max_user_id=20)
+        consilium.create_auth_link.assert_awaited_once_with(
+            max_user_id=20,
+            chat_id=10,
+        )
         message.edit.assert_awaited_once()
         updated = message.edit.await_args.kwargs
         button = updated["attachments"][0].payload.buttons[0][0]
@@ -259,7 +269,10 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
                 payload=REFRESH_LINK_CALLBACK,
                 user=SimpleNamespace(user_id=20),
             ),
-            message=message,
+            message=SimpleNamespace(
+                edit=message.edit,
+                recipient=SimpleNamespace(chat_id=10),
+            ),
             edit=AsyncMock(),
         )
         consilium = SimpleNamespace(

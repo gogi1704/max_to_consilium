@@ -193,6 +193,7 @@ class ConsiliumClient:
     async def create_auth_link(
         self,
         max_user_id: int,
+        chat_id: int,
         intent_token: str = "",
     ) -> str:
         result = await asyncio.to_thread(
@@ -201,6 +202,7 @@ class ConsiliumClient:
             {
                 "provider": "max",
                 "provider_user_id": str(max_user_id),
+                "chat_id": str(chat_id),
                 "intent_token": intent_token,
             },
             headers={
@@ -313,6 +315,7 @@ async def send_auth_link(
             return
         auth_url = await consilium.create_auth_link(
             max_user_id=max_user_id,
+            chat_id=chat_id,
             intent_token=intent_token,
         )
         await bot.send_message(
@@ -354,7 +357,10 @@ async def refresh_auth_link(
             attachments=[],
             notification=REFRESH_PROGRESS_TEXT,
         )
-        auth_url = await consilium.create_auth_link(max_user_id=max_user_id)
+        auth_url = await consilium.create_auth_link(
+            max_user_id=max_user_id,
+            chat_id=event.message.recipient.chat_id,
+        )
         remaining_delay = REFRESH_DELAY_SECONDS - (
             asyncio.get_running_loop().time() - started_at
         )

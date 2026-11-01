@@ -130,12 +130,6 @@ def healthcheck(settings: Settings) -> bool:
     return -5 <= age <= settings.healthcheck_max_age
 
 
-async def heartbeat(settings: Settings) -> None:
-    while True:
-        mark_healthy(settings.healthcheck_file)
-        await asyncio.sleep(10)
-
-
 def post_json(
     url: str,
     payload: dict[str, Any],
@@ -414,6 +408,66 @@ def register_handlers(
         await refresh_auth_link(event, consilium)
 
 
+async def deliver_notifications_once(
+    bot: Bot, consilium: ConsiliumClient, settings: Settings,
+) -> int:
+    notifications = await consilium.pull_manager_notifications()
+    for notification in notifications:
+        success = False
+        error = ""
+        try:
+            payload = notification.get("payload") or {}
+            action_attachment = notification_attachment(payload)
+            attachments = [action_attachment] if action_attachment else []
+            await bot.send_message(
+                chat_id=int(notification["recipient_id"]),
+                text=(
+                    f"{payload.get('title') or 'Уведомление Консилиума'}\n\n"
+                    f"{payload.get('body') or 'Откройте панель менеджера.'}"
+                ),
+                attachments=attachments,
+            )
+            success = True
+        except Exception as exc:
+            error = str(exc)
+            LOG.warning("Не удалось отправить уведомление: %s", exc)
+        await consilium.acknowledge_notification(
+            int(notification["id"]), str(notification["lease_token"]), success, error,
+        )
+    # The healthcheck represents a complete pull/send/ack cycle, not merely a live process.
+    mark_healthy(settings.healthcheck_file)
+    return len(notifications)
+
+
+async def notification_loop(
+    bot: Bot,
+    consilium: ConsiliumClient,
+    settings: Settings,
+    *,
+    poll_seconds: float = 5,
+    max_consecutive_failures: int = 6,
+) -> None:
+    failures = 0
+    while True:
+        try:
+            await deliver_notifications_once(bot, consilium, settings)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            failures += 1
+            LOG.exception(
+                "Цикл уведомлений MAX завершился с ошибкой (%s/%s)",
+                failures, max_consecutive_failures,
+            )
+            if failures >= max(1, int(max_consecutive_failures)):
+                raise RuntimeError(
+                    "Цикл уведомлений MAX не восстановился после повторных ошибок"
+                )
+        else:
+            failures = 0
+        await asyncio.sleep(poll_seconds)
+
+
 async def run() -> None:
     load_dotenv()
     settings = Settings.from_env()
@@ -423,40 +477,31 @@ async def run() -> None:
     register_handlers(dispatcher, consilium)
     await bot.delete_webhook()
     LOG.info("Webhook MAX отключён; бот запущен в режиме long polling")
-    heartbeat_task = asyncio.create_task(heartbeat(settings))
-    async def notification_loop() -> None:
-        while True:
-            try:
-                for notification in await consilium.pull_manager_notifications():
-                    success = False
-                    error = ""
-                    try:
-                        payload = notification.get("payload") or {}
-                        action_attachment = notification_attachment(payload)
-                        attachments = [action_attachment] if action_attachment else []
-                        await bot.send_message(
-                            chat_id=int(notification["recipient_id"]),
-                            text=f"{payload.get('title') or 'Уведомление Консилиума'}\n\n{payload.get('body') or 'Откройте панель менеджера.'}",
-                            attachments=attachments,
-                        )
-                        success = True
-                    except Exception as exc:
-                        error = str(exc)
-                        LOG.warning("Не удалось отправить уведомление менеджеру: %s", exc)
-                    await consilium.acknowledge_notification(
-                        int(notification["id"]), str(notification["lease_token"]), success, error,
-                    )
-            except RemoteAPIError as exc:
-                LOG.warning("Ошибка получения уведомлений менеджеров: %s", exc)
-            await asyncio.sleep(5)
-
-    notification_task = asyncio.create_task(notification_loop())
     try:
-        await dispatcher.start_polling(bot)
+        settings.healthcheck_file.unlink(missing_ok=True)
+    except OSError:
+        LOG.warning("Не удалось удалить устаревший heartbeat MAX-бота")
+    notification_task = asyncio.create_task(
+        notification_loop(bot, consilium, settings),
+        name="notification-delivery",
+    )
+    polling_task = asyncio.create_task(
+        dispatcher.start_polling(bot),
+        name="max-long-polling",
+    )
+    try:
+        done, _ = await asyncio.wait(
+            {notification_task, polling_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in done:
+            exception = task.exception()
+            if exception is not None:
+                raise exception
     finally:
-        heartbeat_task.cancel()
         notification_task.cancel()
-        await asyncio.gather(heartbeat_task, notification_task, return_exceptions=True)
+        polling_task.cancel()
+        await asyncio.gather(notification_task, polling_task, return_exceptions=True)
         await bot.close_session()
 
 

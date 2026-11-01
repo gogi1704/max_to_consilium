@@ -17,6 +17,8 @@ from bot import (
     REFRESH_LINK_CALLBACK,
     healthcheck,
     mark_healthy,
+    deliver_notifications_once,
+    notification_loop,
     notification_attachment,
     refresh_auth_link,
     register_handlers,
@@ -113,6 +115,58 @@ class ConsiliumClientTests(unittest.IsolatedAsyncioTestCase):
         with patch("bot.post_json", return_value={"auth_url": "javascript:x"}):
             with self.assertRaises(RemoteAPIError):
                 await ConsiliumClient(settings).create_auth_link(1, 2)
+
+
+class NotificationDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_successful_cycle_updates_heartbeat_after_ack(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            heartbeat = Path(temp_dir) / "heartbeat"
+            settings = Settings(
+                "max-token", "https://example.test", "secret",
+                healthcheck_file=heartbeat,
+            )
+            bot = SimpleNamespace(send_message=AsyncMock())
+            consilium = SimpleNamespace(
+                pull_manager_notifications=AsyncMock(return_value=[{
+                    "id": 7, "recipient_id": "123", "lease_token": "lease",
+                    "payload": {"title": "Проверка", "body": "Работает"},
+                }]),
+                acknowledge_notification=AsyncMock(),
+            )
+
+            count = await deliver_notifications_once(bot, consilium, settings)
+
+            self.assertEqual(count, 1)
+            consilium.acknowledge_notification.assert_awaited_once_with(
+                7, "lease", True, "",
+            )
+            self.assertTrue(heartbeat.is_file())
+
+    async def test_failed_pull_does_not_refresh_heartbeat(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            heartbeat = Path(temp_dir) / "heartbeat"
+            settings = Settings(
+                "max-token", "https://example.test", "secret",
+                healthcheck_file=heartbeat,
+            )
+            consilium = SimpleNamespace(
+                pull_manager_notifications=AsyncMock(side_effect=RemoteAPIError("offline")),
+            )
+            with self.assertRaises(RemoteAPIError):
+                await deliver_notifications_once(SimpleNamespace(), consilium, settings)
+            self.assertFalse(heartbeat.exists())
+
+    async def test_persistent_delivery_failures_terminate_loop(self) -> None:
+        settings = Settings("max-token", "https://example.test", "secret")
+        consilium = SimpleNamespace(
+            pull_manager_notifications=AsyncMock(side_effect=RemoteAPIError("offline")),
+        )
+        with self.assertRaises(RuntimeError):
+            await notification_loop(
+                SimpleNamespace(), consilium, settings,
+                poll_seconds=0, max_consecutive_failures=2,
+            )
+        self.assertEqual(consilium.pull_manager_notifications.await_count, 2)
 
 
 class HandlerTests(unittest.IsolatedAsyncioTestCase):

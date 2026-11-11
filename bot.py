@@ -241,6 +241,20 @@ class ConsiliumClient:
             timeout=self.settings.request_timeout,
         )
 
+    async def submit_broadcast_vote(
+        self, max_user_id: int, callback_data: str,
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            post_json,
+            f"{self.settings.consilium_api_url}/api/bot/broadcast-vote",
+            {
+                "provider": "max", "provider_user_id": str(max_user_id),
+                "callback_data": callback_data,
+            },
+            headers={"Authorization": f"Bearer {self.settings.bot_integration_secret}"},
+            timeout=self.settings.request_timeout,
+        )
+
 
 def auth_attachment(auth_url: str):
     return ButtonsPayload(
@@ -262,6 +276,17 @@ def auth_attachment(auth_url: str):
 
 
 def notification_attachment(payload: dict[str, Any]):
+    poll_options = payload.get("poll_options")
+    if payload.get("kind") == "broadcast_poll" and isinstance(poll_options, list):
+        buttons = []
+        for option in poll_options[:10]:
+            if not isinstance(option, dict):
+                continue
+            label = str(option.get("label") or "").strip()[:64]
+            callback_data = str(option.get("callback_data") or "").strip()
+            if label and callback_data:
+                buttons.append([CallbackButton(text=label, payload=callback_data)])
+        return ButtonsPayload(buttons=buttons).pack() if buttons else None
     manager_url = str(payload.get("manager_url") or "")
     action_url = str(payload.get("action_url") or manager_url)
     if not action_url.startswith(("http://", "https://")):
@@ -379,6 +404,24 @@ async def refresh_auth_link(
             LOG.exception("Не удалось показать ошибку обновления ссылки")
 
 
+async def handle_broadcast_vote(
+    event: MessageCallback,
+    consilium: ConsiliumClient,
+) -> None:
+    callback_data = str(event.callback.payload or "")
+    if not callback_data.startswith("broadcast_vote:"):
+        return
+    try:
+        result = await consilium.submit_broadcast_vote(
+            event.callback.user.user_id, callback_data,
+        )
+        prefix = "Ответ изменён" if result.get("changed") else "Ответ принят"
+        await event.ack(notification=f"{prefix}: {result.get('label') or 'готово'}")
+    except RemoteAPIError as exc:
+        LOG.warning("Не удалось сохранить голос MAX: %s", exc)
+        await event.ack(notification="Не удалось сохранить ответ. Попробуйте ещё раз.")
+
+
 def register_handlers(
     dispatcher: Dispatcher,
     consilium: ConsiliumClient,
@@ -405,7 +448,10 @@ def register_handlers(
 
     @dispatcher.message_callback()
     async def refresh_link_callback(event: MessageCallback) -> None:
-        await refresh_auth_link(event, consilium)
+        if str(event.callback.payload or "").startswith("broadcast_vote:"):
+            await handle_broadcast_vote(event, consilium)
+        else:
+            await refresh_auth_link(event, consilium)
 
 
 async def deliver_notifications_once(

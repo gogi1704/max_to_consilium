@@ -20,6 +20,7 @@ from bot import (
     deliver_notifications_once,
     notification_loop,
     notification_attachment,
+    handle_broadcast_vote,
     refresh_auth_link,
     register_handlers,
     send_auth_link,
@@ -37,6 +38,19 @@ class SettingsTests(unittest.TestCase):
         button = attachment.payload.buttons[0][0]
         self.assertEqual(button.text, "Открыть результаты")
         self.assertEqual(button.url, "https://consilium.test/result")
+
+    def test_broadcast_poll_has_callback_buttons(self) -> None:
+        attachment = notification_attachment({
+            "kind": "broadcast_poll",
+            "poll_options": [
+                {"label": "Да", "callback_data": "broadcast_vote:one:o1"},
+                {"label": "Нет", "callback_data": "broadcast_vote:one:o2"},
+            ],
+        })
+        self.assertIsNotNone(attachment)
+        first = attachment.payload.buttons[0][0]
+        self.assertEqual(first.text, "Да")
+        self.assertEqual(first.payload, "broadcast_vote:one:o1")
 
     def test_settings_are_loaded_and_api_url_is_normalized(self) -> None:
         env = {
@@ -338,6 +352,23 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         updated = message.edit.await_args.kwargs
         retry_button = updated["attachments"][0].payload.buttons[0][0]
         self.assertEqual(retry_button.payload, REFRESH_LINK_CALLBACK)
+
+    async def test_broadcast_vote_is_forwarded_and_acknowledged(self) -> None:
+        callback_data = "broadcast_vote:11111111-1111-4111-8111-111111111111:o1"
+        event = SimpleNamespace(
+            callback=SimpleNamespace(
+                payload=callback_data, user=SimpleNamespace(user_id=20),
+            ),
+            ack=AsyncMock(),
+        )
+        consilium = SimpleNamespace(
+            submit_broadcast_vote=AsyncMock(return_value={
+                "status": "recorded", "label": "Да", "changed": False,
+            }),
+        )
+        await handle_broadcast_vote(event, consilium)
+        consilium.submit_broadcast_vote.assert_awaited_once_with(20, callback_data)
+        event.ack.assert_awaited_once_with(notification="Ответ принят: Да")
 
     def test_docker_deployment_is_isolated_and_polling_disables_webhook(self) -> None:
         project = Path(__file__).resolve().parents[1]

@@ -359,6 +359,8 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
             callback=SimpleNamespace(
                 payload=callback_data, user=SimpleNamespace(user_id=20),
             ),
+            message=SimpleNamespace(),
+            edit=AsyncMock(),
             ack=AsyncMock(),
         )
         consilium = SimpleNamespace(
@@ -368,7 +370,10 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         )
         await handle_broadcast_vote(event, consilium)
         consilium.submit_broadcast_vote.assert_awaited_once_with(20, callback_data)
-        event.ack.assert_awaited_once_with(notification="Ответ принят: Да")
+        event.edit.assert_awaited_once_with(
+            attachments=[], notification="Ответ принят: Да",
+        )
+        event.ack.assert_not_awaited()
 
     def test_docker_deployment_is_isolated_and_polling_disables_webhook(self) -> None:
         project = Path(__file__).resolve().parents[1]

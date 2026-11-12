@@ -415,8 +415,20 @@ async def handle_broadcast_vote(
         result = await consilium.submit_broadcast_vote(
             event.callback.user.user_id, callback_data,
         )
-        prefix = "Ответ изменён" if result.get("changed") else "Ответ принят"
-        await event.ack(notification=f"{prefix}: {result.get('label') or 'готово'}")
+        prefix = (
+            "Ответ уже принят" if result.get("already_recorded") else "Ответ принят"
+        )
+        notification = f"{prefix}: {result.get('label') or 'готово'}"
+        if event.message is not None:
+            try:
+                # Empty attachments remove the callback keyboard while keeping
+                # the original message text unchanged.
+                await event.edit(attachments=[], notification=notification)
+            except Exception:
+                LOG.exception("Голос сохранён, но кнопки MAX не удалены")
+                await event.ack(notification=notification)
+        else:
+            await event.ack(notification=notification)
     except RemoteAPIError as exc:
         LOG.warning("Не удалось сохранить голос MAX: %s", exc)
         await event.ack(notification="Не удалось сохранить ответ. Попробуйте ещё раз.")
